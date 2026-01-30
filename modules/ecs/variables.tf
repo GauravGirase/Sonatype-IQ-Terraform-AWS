@@ -1,0 +1,22 @@
+variable "aws_secretsmanager_secret_db_credential_arn" {}
+variable "aws_region" {}
+variable "enable_log_archive" {}
+variable "ecs_cpu" {}
+variable "ecs_memory" {}
+variable "execution_role_arn" {}
+variable "task_role_arn"{}
+variable "iq_docker_image" {}
+variable "java_opts" {}
+variable "db_instance_iq_db_address" {}
+variable "db_instance_iq_db_name" {}
+variable "aws_secretmanager_secret_db_arn" {}
+variable "aws_cloudwatch_log_group_name" {}
+variable "fluent_bit_image" {}
+variable "aws_efs_file_system_iq_efs_id" {}
+variable "aws_efs_access_point_iq_access_point_id" {}
+variable "aws_efs_access_point_iq_logs_access_point_id" {}
+variable "id_desired_count" {}
+variable "private_subnets" {}
+variable "aws_security_group_ecs_tasks_id" {}
+variable "aws_lb_target_group_iq_tg_arn" {}
+variable "aws_security_group_efs_id" {}

@@ -1,0 +1,425 @@
+resource "aws_ecs_cluster" "iq_cluster" {
+  name = "ref-arch-iq-cluster"
+
+/*
+Enables CloudWatch Container Insights for this ECS cluster, which provides:
+    CPU & memory usage (cluster / service / task level)
+    Task count & failures
+    Disk and network metrics
+    Logs & performance insights in CloudWatch
+*/
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
+  tags = {
+    Name        = "ref-arch-iq-cluster"
+  }
+}
+
+resource "aws_ecs_task_definition" "iq_task" {
+    family = "ref-arch-nexus-iq-server"
+    network_mode = "awsvpc"
+    cpu = var.ecs_cpu
+    memory = var.ecs_memory
+    execution_role_arn = var.execution_role_arn
+    task_role_arn = var.task_role_arn
+    requires_compatibilities = ["FARGATE"]
+
+    container_definitions = jsonencode(concat([
+        {
+          name = "nexus-iq-server"
+          image = var.iq_docker_image
+          essential = true
+          user = "0:0"
+          portMapping = [
+                {
+                    containerPort = 8070
+                    protocol = "tcp"
+                },
+                {
+                    containerPort = 8071
+                    protocol = "tcp"
+                }
+          ]
+
+          environment = [
+              {
+                  name = "JAVA_OPTS"
+                  value = var.java_opts
+              },
+              {
+                  name = "NEXUS_SECURITY_RANDOMPASSWORD"
+                  value = "false"
+              },
+              {
+                  name = "DB_HOST"
+                  value = var.db_instance_iq_db_address
+              },
+              {
+                  name = "DB_PORT"
+                  value = "5432"
+              },
+              {
+                  name = "DB_NAME"
+                  value = db_instance_iq_db_name
+              }
+          ]
+
+          entrypoint = ["/bin/sh", "-c"]
+          command = [
+        <<-EOF
+          set -e
+          echo "Starting Nexus IQ Server Single Instance with official Docker image"
+
+
+          mkdir -p /etc/nexus-iq-server
+          cat > /etc/nexus-iq-server/config.yml << 'CONFIGEOF'
+sonatypeWork: /sonatype-work
+
+
+database:
+  type: postgresql
+  hostname: $DB_HOST
+  port: $DB_PORT
+  name: $DB_NAME
+  username: $DB_USERNAME
+  password: $DB_PASSWORD
+
+server:
+  applicationConnectors:
+  - type: http
+    port: 8070
+    bindHost: 0.0.0.0
+  adminConnectors:
+  - type: http
+    port: 8071
+    bindHost: 0.0.0.0
+  requestLog:
+    appenders:
+    - type: file
+      currentLogFilename: "/var/log/nexus-iq-server/request.log"
+      archivedLogFilenamePattern: "/var/log/nexus-iq-server/request-%d.log.gz"
+      archivedFileCount: 5
+
+logging:
+  level: DEBUG
+  loggers:
+    com.sonatype.insight.scan: INFO
+    eu.medsea.mimeutil.MimeUtil2: INFO
+    org.apache.http: INFO
+    org.apache.http.wire: ERROR
+    org.eclipse.birt.report.engine.layout.pdf.font.FontConfigReader: WARN
+    org.eclipse.jetty: INFO
+    org.apache.shiro.web.filter.authc.BasicHttpAuthenticationFilter: INFO
+    com.networknt.schema: OFF
+    com.sonatype.insight.audit:
+      appenders:
+      - type: file
+        currentLogFilename: "/var/log/nexus-iq-server/audit.log"
+        archivedLogFilenamePattern: "/var/log/nexus-iq-server/audit-%d.log.gz"
+        archivedFileCount: 50
+    com.sonatype.insight.policy.violation:
+      appenders:
+      - type: file
+        currentLogFilename: "/var/log/nexus-iq-server/policy-violation.log"
+        archivedLogFilenamePattern: "/var/log/nexus-iq-server/policy-violation-%d.log.gz"
+        archivedFileCount: 50
+  appenders:
+  - type: console
+    threshold: INFO
+    logFormat: "%d{'yyyy-MM-dd HH:mm:ss,SSSZ'} %level [%thread] %X{username} %logger - %msg%n"
+  - type: file
+    threshold: ALL
+    currentLogFilename: "/var/log/nexus-iq-server/clm-server.log"
+    archivedLogFilenamePattern: "/var/log/nexus-iq-server/clm-server-%d.log.gz"
+    logFormat: "%d{'yyyy-MM-dd HH:mm:ss,SSSZ'} %level [%thread] %X{username} %logger - %msg%n"
+    archivedFileCount: 50
+
+createSampleData: true
+CONFIGEOF
+
+
+          sed -i "s|\$DB_HOST|$DB_HOST|g" /etc/nexus-iq-server/config.yml
+          sed -i "s|\$DB_PORT|$DB_PORT|g" /etc/nexus-iq-server/config.yml
+          sed -i "s|\$DB_NAME|$DB_NAME|g" /etc/nexus-iq-server/config.yml
+          sed -i "s|\$DB_USERNAME|$DB_USERNAME|g" /etc/nexus-iq-server/config.yml
+          sed -i "s|\$DB_PASSWORD|$DB_PASSWORD|g" /etc/nexus-iq-server/config.yml
+
+          echo "Successfully created config.yml with database configuration"
+          echo "Generated config file contents:"
+          cat /etc/nexus-iq-server/config.yml
+
+
+          export JAVA_OPTS
+
+          echo "Starting Nexus IQ Server Single Instance"
+          exec /opt/sonatype/nexus-iq-server/bin/nexus-iq-server server /etc/nexus-iq-server/config.yml
+        EOF
+      ]
+
+      secrets = [
+        {
+            name = "DB_USERNAME"
+            valueFrom = "${var.aws_secretmanager_secret_db_arn}:username"
+        },
+        {
+            name = "DB_PASSWORD"
+            valueFrom = "${var.aws_secretmanager_secret_db_arn}:password"
+        }
+      ]
+    
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group" = var.aws_cloudwatch_log_group_name
+          "awslogs-region" = var.aws_region
+          "awslogs-stream-prefix" = "stdout"
+        }
+      }
+
+      healthcheck = {
+        command = [
+          "CMD-SHELL",
+          "curl -f http://locolhost:8071/healthcheck/database && curl -f http://localhost:8071/healthcheck/workDirectory || exit 1"
+        ]
+        interval = 30
+        timeout = 10
+        retries = 3
+        startPeriod = 120
+      }
+
+      mountPoint = [
+        {
+          sourceVolume = "iq-data"
+          containerPath = "/sonatype-work"
+          readOnly = false
+        },
+        {
+          sourceVolume = "iq-logs"
+          containerPath = "/var/log/nexus-iq-server"
+          readOnly = false
+        }
+      ]
+        
+      }
+    ], # container 1 confiuration ends here
+        
+      [{
+        name = "log_router"
+        image = var.fluent_bit_image
+        essential = false
+        entrypoint = ["/bin/sh", "-c"]
+        command = [
+          <<-EOF
+            set -e
+            echo "Loading fluent bit configuration from environment"
+            mkdir -p /fluent-bit/etc /fluent-bit/parsers /fluent-bit/state /var/log/nexus-iq-server/aggregated
+
+            echo "$FLUENT_BIT_CONFIG" > /fluent-bit/etc/fluent-bit.conf
+            echo "$FLUENT_BIT_CONFIG" > /fluent-bit/parsers/parsers.conf
+
+            echo "Configuration loaded successfully"
+            echo "Starting Fluent Bit..."
+
+            exec /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluent-bit.conf
+
+          EOF
+        ]
+
+        secrets = [
+          {
+            name      = "FLUENT_BIT_CONFIG"
+            valueFrom = aws_ssm_parameter.fluent_bit_config.arn
+          },
+          {
+            name      = "FLUENT_BIT_PARSERS"
+            valueFrom = aws_ssm_parameter.fluent_bit_parsers.arn
+          }
+        ]
+
+         environment = [
+          {
+            name  = "AWS_REGION"
+            value = var.aws_region
+          },
+          {
+            name  = "FLB_LOG_LEVEL"
+            value = "info"
+          },
+          {
+            name  = "CLUSTER_NAME"
+            value = "ref-arch-iq-cluster"
+          }
+        ]
+
+        mountPoints = [
+          {
+            sourceVolume  = "iq-logs"
+            containerPath = "/var/log/nexus-iq-server"
+            readOnly      = false
+          }
+        ]
+
+        cpu            = 256
+        memory         = 512
+        memoryReservation = 256
+
+        healthCheck = {
+          command     = ["CMD-SHELL", "curl -sf http://localhost:2020/api/v1/health || exit 1"]
+          interval    = 30
+          timeout     = 5
+          retries     = 3
+          startPeriod = 60
+        }
+
+        logConfiguration = {
+          logDriver = "awslogs"
+          options = {
+            "awslogs-group"         = aws_cloudwatch_log_group.iq_logs.name
+            "awslogs-region"        = var.aws_region
+            "awslogs-stream-prefix" = "fluent-bit"
+          }
+        }
+
+        dependsOn = [{
+            containerName = "nexus-iq-server"
+            condition     = "START"
+        }]
+
+      }]
+  ))
+
+  volume {
+    name = "iq-data"
+    efs_volume_configuration {
+      file_system_id     = var.aws_efs_file_system_iq_efs_id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = var.aws_efs_access_point_iq_access_point_id
+        iam             = "ENABLED"
+      }
+    }
+  }
+
+  volume {
+    name = "iq-logs"
+    efs_volume_configuration {
+      file_system_id     = var.aws_efs_file_system_iq_efs_id
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = var.aws_efs_access_point_iq_logs_access_point_id
+        iam             = "ENABLED"
+      }
+    }
+  }
+
+  tags = {
+    Name        = "ref-arch-iq-task-definition"
+  } 
+}
+
+resource "aws_ecs_service" "iq_service" {
+  name = "ref-arch-nexus-iq-service"
+  cluster = aws_ecs_cluster.iq_cluster.id
+  task_definition = aws_ecs_task_definition.iq_task.id
+  desired_count = var.id_desired_count
+  launch_type = "FARGATE"
+
+  /*
+  ECS allows 0% of tasks to be healthy during deployment
+  It’s OK if all tasks are stopped temporarily
+  */
+  deployment_maximum_percent = 100 # “Don’t run extra containers”
+  deployment_minimum_healthy_percent = 0 # “It’s okay if everything goes down”
+
+  network_configuration {
+    subnets = var.private_subnets[*].id
+    security_groups = [var.aws_security_group_ecs_tasks_id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = var.aws_lb_target_group_iq_tg_arn
+    container_name = "nexus-iq-server"
+    container_port = 8070
+  }
+
+  depends_on = [ 
+    aws_iam_role_policy_attachment.ecs_execution_role_policy
+  ]
+
+  tags = {
+    Name        = "ref-arch-iq-service"
+  }
+
+}
+
+resource "aws_efs_file_system" "iq_efs" {
+  creation_token = "ref-arch-iq-efs"
+  encrypted      = true
+
+  performance_mode = "generalPurpose"
+  throughput_mode  = "provisioned"
+  provisioned_throughput_in_mibps = 100
+
+  tags = {
+    Name        = "ref-arch-iq-efs"
+  }
+}
+
+resource "aws_efs_mount_target" "iq_efs_mt" {
+  count           = length(aws_subnet.private_subnets)
+  file_system_id  = aws_efs_file_system.iq_efs.id
+  subnet_id       = aws_subnet.private_subnets[count.index].id
+  security_groups = [var.aws_security_group_efs_id]
+}
+
+/*
+This creates a secure, permission-safe folder inside EFS that your ECS tasks can mount and write to without running as root.
+*/
+resource "aws_efs_access_point" "iq_access_point" {
+  file_system_id = aws_efs_file_system.iq_efs.id
+
+  posix_user {
+    uid = 1000
+    gid = 1000
+  }
+
+  root_directory {
+    path = "/nexus-iq-data"
+    creation_info {
+      owner_uid   = 1000
+      owner_gid   = 1000
+      permissions = "0755"
+    }
+  }
+
+  tags = {
+    Name        = "ref-arch-iq-efs-access-point"
+  }
+}
+
+
+resource "aws_efs_access_point" "iq_logs_access_point" {
+  file_system_id = aws_efs_file_system.iq_efs.id
+
+  posix_user {
+    uid = 1000
+    gid = 1000
+  }
+
+  root_directory {
+    path = "/nexus-iq-logs"
+    creation_info {
+      owner_uid   = 1000
+      owner_gid   = 1000
+      permissions = "0755"
+    }
+  }
+
+  tags = {
+    Name        = "ref-arch-iq-efs-logs-access-point"
+  }
+}
